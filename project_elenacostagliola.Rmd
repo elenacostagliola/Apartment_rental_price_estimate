@@ -1,0 +1,444 @@
+---
+title: "Apartments for rent classified"
+author: "Elena Costagliola"
+date: "25/08/2020"
+output:
+  pdf_document: 
+    fig_caption: yes
+    fig_crop: no
+    fig_height: 3
+    fig_width: 6
+    highlight: haddock
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+  html_document: default
+header-includes: 
+- \usepackage{graphicx}
+- \usepackage{float}
+
+---
+
+```{r global options, include = FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+library(plyr)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(ggcorrplot)
+library(MASS)
+library(leaps)
+library(car) 
+library(cowplot)
+library(gridGraphics)
+library(reshape2)
+library(glmnet)
+library(pandocfilters)
+library(caTools)
+```
+
+
+```{r}
+load("apartments_for_rent_classified_final.RData")
+```
+
+# Introduction
+
+The Apartments for Rent Classified original dataset was found on [UCI - MLR](https://archive.ics.uci.edu/ml/datasets/Apartment+for+rent+classified) but, as it was missing on the website, it has been personally requested to the Source. On UCI the description informs about two possible versions of the same dataset: one with 10,000 rows and the other with 100,000. The Source sent only the 10000 rows' file.
+
+These data were cleaned to fill the missing values when possible, in other cases it was decided to delete the rows which showed inaffidability of the source. The dataset, in fact, results from the collection of data about apartments for rent classified in the USA. Unusual values would be more probably a mistype in the ad than a real information.
+
+The goal of this report is to estimate the rental price of an apartment after identifying its most influential features. For this purpose, regression methods will be used.
+
+The dataset consists of `r nrow(df)` apartments for rent classified (from now on, *ARC*) and `r ncol(df)` features which characterize each one, including the corresponding price of rent. In this context it is possible to treat the ARCs as bundles of characteristics and prices can be attached to each of them. The statistical and economic method to deal with this kind of situation is known as *hedonic method*.
+In fact, it is a regression technique which allows to estimate how much of the final value of a good is determined by its characteristics. Moreover, this is associated to the economic concept of utility in which each amenity of the apartment increases the overall utility of the ARC itself.
+
+For this reason, it will be analyzed how inserting amenities in the ads would affect the potential rental price, ceteris paribus.
+
+Moreover, the relation between the geographic area and the rental price of the apartment will be the focus of the analysis, as well as the relation between the size of the apartment and the number of bedrooms.
+
+
+# Exploratory Data Analysis
+## The features
+
+```{r}
+summary(df)
+```
+
+### *Categories of Apartments for Rent Classified*
+
+As seen in the summary above, most of the ARCs are classified as "apartment", while there is a small bunch of ARCs defined as studios. Comparing the numbers of bedrooms in the two categories (Figure 1), there is a small part of the apartments with no bedrooms, which seems to be unlinkely for an apartment but realistic for studios. 
+
+```{r data-import, fig.pos="H", include = T, fig.cap = "Number of bedrooms by category of Apartment for Rent Classified."}
+ggplot(data = df, aes(x = bedrooms_f, fill = newcategory)) + geom_bar() +
+  labs(subtitle = "") +
+  xlab("Number of bedrooms") + 
+  ylab("Count") +
+  labs(fill = "Category") + #legend title
+  scale_fill_discrete(labels = c("Apartment", "Studio"))
+  
+```
+
+```{r}
+df2 <- df[(df$bedrooms_f == 0 & df$newcategory == "apartment"),]
+```
+
+In particular, there are `r nrow(df2)` apartments without bedrooms and they have been excluded from the present analysis, as they have been considered mistakes. It is worth noting, instead, that the ARCs defined as studios in some cases have more than one bedroom. It was decided to keep this information despite it seems unusual.
+
+```{r}
+df <- df[!(df$bedrooms_f == 0 & df$newcategory == "apartment"),]
+```
+
+An insight on these data has been conducted including the price of the ARCs (Figure 2) and it shows that the prices of ARCs are not affected by the number of rooms. This point is also confirmed by a low correlation (`r cor(df$bedrooms, df$price)`) between the number of bedrooms and prices.
+
+```{r fig.pos="H", fig.cap = "Number of Bedrooms and Prices ($) compared by category of Apartment for Rent Classified."}
+ggplot(data = df, aes(x = bedrooms_f, y = price, color = newcategory)) + geom_boxplot() + 
+  ylab(label = "Price - $")  +
+  xlab(label = "Number of bedrooms") +
+  labs(color = "Category") + #legend title
+  scale_color_discrete(labels = c("Apartment", "Studio"))
+
+```
+
+This is probably due to the fact that having more bedrooms at the same square meters, on average, could reduce the value of the ARC rather than increasing it by resulting in smaller rooms.
+
+### *Class of price*
+
+The feature's summary shows that most of the ARCs are under 2000$ per month. Moreover, the Figure 3 gives an idea on the class of price of an ARC by its square meters and geographic position. Statistical divisions were preferred to Regions to keep more precision in the analysis, as will be seen below in this report.
+
+```{r fig.pos="H", fig.cap="Square meters and Class of Prices ($) compared by Statistical Division."}
+ggplot(data = df, aes(x = class_price, y = square_meters, color = SDiv)) + geom_boxplot() +
+  xlab(label = "Class of Price") + 
+  ylab(label = "Square Meters") +
+  theme(axis.text.x = element_text(angle=90,hjust=0.95,vjust=0.3)) + 
+  labs(color = "Statistical Divisions") + #legend title
+  scale_color_discrete(labels = c("(M) East North Central", "(M) West North Central", "(N) Mid-Atlantic", 
+                                     "(N) New England", "(S) East South Central", "(S) South Atlantic",
+                                     "(S) West South Central", "(W) Mountain", "(W) Pacific"))
+```
+
+However, the Figure above shows that there is a tendency for bigger ARCs to belong to higher classes of prices in all the Statistical Divisions, even if a bigger difference can be seen only in the classes from 3000$ on.
+
+### *Number of bathrooms*
+
+This feature has decimal values, probably due to the presence of lobbies in the ARCs.
+
+### *Pets allowed in the apartment*
+
+This is a boolean feature which takes the value 1 when pets are allowed, 0 otherwise. The summary shows that most of the ARCs allow them.
+
+### *Price and Square meters of the Apartment for Rent Classifies*
+
+This two features are here considered together since the high correlation expected between the twos.
+
+The Figure 4 shows that the distributions of square meters and price are very skewed, so they are logarithmically scaled to have normal distributions.
+
+```{r fig.pos="H", fig.cap="Density Plots of Price and Square Meters."}
+price_dplot <- ggplot(df, aes(x=price)) + geom_density(color="darkblue", fill="lightblue") +
+  ggtitle("Price") +
+  xlab("Price - $") + 
+  ylab("Density") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_density(adjust=1.5, alpha=.4) 
+        
+sm_dplot <- ggplot(df, aes(x = square_meters)) + geom_density(color="darkblue", fill="lightblue") +
+  ggtitle("Square Meters") +
+  xlab("Square Meters") + 
+  ylab("Density") +
+  theme(plot.title = element_text(hjust = 0.5))+
+  geom_density(adjust=1.5, alpha=.4)
+
+
+plot_grid(price_dplot, sm_dplot, ncol=2, rel_heights=c(0.1, 1))
+
+
+```
+
+To better understand how prices and square meters are distributed within the Divisions, the Figure 5 fits a linear model using the logarithmically scaled price and square meters. 
+
+```{r fig.pos="H",fig.cap="Normalized Price and Square meters by Statistical Divisions."}
+ggplot(data = df, aes(x = log(square_meters), y = log(price), color = SDiv)) +  geom_point() +
+  geom_smooth(method = "lm", se = F, show.legend = T) +
+  xlab("Square Meters (log)") +
+  ylab(label = "Price (log)") + 
+  labs(color = "Statistical Divisions") + #legend title
+  scale_color_discrete(labels = c("(M) East North Central", "(M) West North Central", "(N) Mid-Atlantic", 
+                                     "(N) New England", "(S) East South Central", "(S) South Atlantic",
+                                     "(S) West South Central", "(W) Mountain", "(W) Pacific"))
+
+```
+
+It shows that the most expensive ARCs are in the Pacific and, on the opposite, the East South Central and West North central have the less expensive ones. 
+The comparison between the slopes of the lines shows that the prices in the Pacific and Mid-Atlantic increase faster then in the other divisions. On the opposite the South Atlantic seems to be cheaper at the same square meters.
+
+To improve the comprehension of the plot, in this context has been used the feature about the Regions to have an overall idea on the relation between price and square meters.
+
+```{r fig.pos="H", fig.cap="Normalized Price and Square meters by Statistical Regions."}
+ggplot(data = df, aes(x = log(square_meters), y = log(price), color = SReg)) +  geom_point() + 
+  geom_smooth(method = "lm", se = F, show.legend = T) +
+  xlab("Square Meters (log)") +
+  ylab(label = "Price (log)") + 
+  labs(color = "Statistical Regions") + #legend title
+  scale_color_discrete(labels = c("Midwest", "Northeast", "South", "West"))
+
+```
+
+Figure 6 confirms the observations made for Pacific and West North Central in Figure 5. It's evident here that the Northeast, together with the West especially for ARCs from `r round(exp(5.5), 0)` on, show the most expensive ARCs.
+
+Also it is more evident than in the previously seen Figure 5 that, above the level of around 5 log(square_meters), the rental price of ARCs in the Midwest tend to be higher than those in the South, confirming  that in the South the price increases more slowly than in the Midwest. This also means that an apartment around `r round(exp(5), 0)` square meters in the Midwest is more expensive than one with the same square meters in the South.
+
+```{r fig.pos="H", fig.cap="Presence of amenities in the Apartments for Rent Classified."}
+
+# dataframe with the amenities
+amenities <- df[,11:37]
+# create frequency table
+freq <- table(col(amenities), as.matrix(amenities))
+# vector with amenities names
+Names <- names(amenities)
+#dataframe with frequencies and names
+data <- data.frame(cbind(freq), Names)
+
+#create a dataframe with the frequencies of 0 and 1 for each amenity 
+data.m <- melt(data, id.vars = "Names")
+
+
+ggplot(data.m, aes(Names, value)) + 
+  geom_bar(aes(fill = variable), position = "stack", stat = "identity") +
+  theme(axis.text.x = element_text(angle=90,hjust=0.95,vjust=0.3)) +
+  xlab(label = "Amenities") + 
+  ylab(label = "Count") + 
+  scale_fill_discrete(name = " Presence of \n the amenity", labels = c("False", "True")) 
+
+
+```
+
+### *Amenities*
+
+The least 27 columns refer to the amenities offered by the ARC. As shown in the Figure 7, amenities are offered only by a small part of the ARCs. Roughly speaking, the only amenities offered by more than the 50% of the ARCs are dishwasher, parking, pool and refrigerator. 
+
+The impact of these variables on the ARC's final price will be on of the objects of this analysis.
+
+# Model Fitting and Features' Selection
+
+The scope of this section is to select the most relevant features which affect the final price of the ARCs. To reach the goal two methos will be used: the K-Fold Cross Validation and LASSO (Least Absolute Shrinkage and Selection Operator).
+
+Dataset has been splitted into two subsets: the training set consisting of 2/3 of data and the test set for the remaining 1/3, both randomly selected. The first one will be used to fit the model, the second one to predict the result and evaluate the accuracy.
+
+```{r Create a new dataframe without not used features}
+df3 <- dplyr::select(df,-c("class_price", "bedrooms_f", "SReg") )
+
+df3[,c("price", "square_meters")] <- lapply(df3[,c("price", "square_meters")], log)
+
+```
+
+```{r Creating training set, test set is not specifically assigned}
+set.seed(10)
+train <- sample(1:dim(df3)[1], ceiling(dim(df3)[1]/3*2))
+
+```
+
+```{r}
+x <- model.matrix(price~ ., df3)
+y <- df3$price
+```
+
+## K-Fold Cross Validation
+
+To perform Cross Validation it has been set a K = 10, so the training set is randomly partitioned in 10 equal sizes subsets. Each of the folds is used as validation set at least one time, while the other partitions are used as training sets. This procedure is repeated 10 times.
+
+```{r}
+nmax <- 33 
+```
+
+```{r}
+k <- 10 
+set.seed(10)
+folds <- sample(1:k, nrow(df3), replace=TRUE)
+cv.errors <- matrix(NA, nrow=k, ncol=nmax, dimnames=list(NULL, paste(1:nmax)))
+```
+
+
+```{r, Backward}
+regfit.bwd <- regsubsets(price ~ ., data=df3[train, ], method = "backward", nvmax=nmax)
+```
+
+
+```{r}
+predict.regsubsets <- function(object, newdata, id, ...) {
+    form <- as.formula(object$call[[2]]) 
+    mat <- model.matrix(form, newdata)
+    coefi <- coef(object, id=id)
+    xvars <- names(coefi)
+    mat[, xvars] %*% coefi
+}
+
+for(j in 1:k) { # for each fold
+    bwd.fit <- regsubsets(price ~ ., data=df3[folds != j, ], method = "backward", nvmax=nmax)
+    for(i in 1:nmax) { # for each i-variable set
+        pred <- predict(bwd.fit, df3[folds==j, ], id=i)
+        cv.errors[j, i] <- mean((df3$price[folds==j] - pred)^2)
+    }
+}
+
+```
+
+
+```{r}
+mean.cv.errors.bwd <- apply(cv.errors, MARGIN=2, FUN=mean) 
+nbest_bwd <- which.min(mean.cv.errors.bwd)
+
+regfit.bwd <- regsubsets(price ~ ., data=df3[train, ], method = "backward", nvmax=nbest_bwd)
+pred <- predict(regfit.bwd, df3[-train, ], id = nbest_bwd)
+
+mse_bwd <- mean((pred - y[-train])^2)
+
+```
+
+
+
+```{r, include = F}
+
+reg.bwd <- regsubsets(price ~ ., data=df3, nvmax=nmax)
+coef(reg.bwd, nbest_bwd)
+```
+
+
+```{r, Forward}
+regfit.fwd <- regsubsets(price ~ ., data=df3[train, ], method = "forward", nvmax=nmax)
+```
+
+
+```{r}
+predict.regsubsets <- function(object, newdata, id, ...) {
+    form <- as.formula(object$call[[2]]) 
+    mat <- model.matrix(form, newdata)
+    coefi <- coef(object, id=id)
+    xvars <- names(coefi)
+    mat[, xvars] %*% coefi
+}
+
+for(j in 1:k) { # for each fold
+    fwd.fit <- regsubsets(price ~ ., data=df3[folds != j, ], method = "forward", nvmax=nmax)
+    for(i in 1:nmax) { # for each i-variable set
+        pred <- predict(fwd.fit, df3[folds==j, ], id=i)
+        cv.errors[j, i] <- mean((df3$price[folds==j] - pred)^2)
+    }
+}
+
+```
+
+
+```{r}
+mean.cv.errors <- apply(cv.errors, MARGIN=2, FUN=mean) 
+nbest_fwd <- which.min(mean.cv.errors)
+
+regfit.fwd <- regsubsets(price ~ ., data=df3[train, ], method = "forward", nvmax=nbest_fwd)
+pred <- predict(regfit.fwd, df3[-train, ], id = nbest_fwd)
+
+mse_fwd <- mean((pred - y[-train])^2)
+
+```
+
+```{r}
+reg.fwd <- regsubsets(price ~ ., data=df3, nvmax=nmax)
+
+coef(reg.fwd, nbest_fwd)
+
+
+
+```
+
+The model was fitted using both the backward and forward stepwise selection, but the second one was preferred since the model was less complex than that selected by the backward. In fact, with the Cross Validation performed by using forward stepwise algorithm the variables selected were `nbest_fwd` , while with the backward three more variables were included, with the same mean squared errors of `round(mse_fwd, 3)`
+
+The resulting model seems to be quite coherent with what was discovered in the explorative analysis. The number of bedrooms, in fact is excluded from this model since it is not significant. Further, the ARC being a studio increases the overall price by 12.8%, while if pets are allowed the price is almost 6% lower. 
+
+It is worth analyzing the coefficient of the square meters. Since this feature and the price are both logarithmically scaled, this coefficient indicates that to an increase of the ARC's size by 1% corresponds an increase of the price by more than 0.42%. In economic terms, this coefficient can be interpreted as the elasticity of the price with relative to the size of the apartments. In fact, an elasticity < 1 implies that by increasing the quantity (in terms of square meters) the price increases more slowly.
+
+```{r}
+col = c("SDivmidwest_westnorth_central", "SDivnortheast_middle_atlantic", "SDivnortheast_newengland",
+        "SDivsouth_eastsouth_central", "SDivsouth_south_atlantic", "SDivwest_mountain", "SDivwest_pacific"
+        )
+
+values = c(-0.07513626, 0.35447332, 0.42647052, -0.07417701, 0.13203953, 0.10877985, 0.60954334 )
+
+d <- data.frame(row.names = col, values)
+```
+
+As far as geographical features are concerned, the baseline used was East North Central (Midwest). In fact, an ARC located in the West North Central (Midwest) and East South Central (South) are underprized with respect to East North Central (Midwest) by 7.5%. In decreasing order the most expensive ARCs seem to be located in:
+- Pacific (+60.9%)
+- New England (+42.6%)
+- Mid-Atlantic (+35.4%)
+- South Atlantic (+13.2%)
+- Mountain (10.8%)
+
+The only geographic area excluded from the model is West South Central.
+
+
+Finally, let's focus on the most intriguing aspect: the value of amenities offered by the ARC. In the EDA it was evident that only a small number of the ARCs listed the amenities present, but the question was how much they impact on the final price of the ARC. 
+The selected model confirms that on average ARCs with elevator, woodfloors, view, doorman and luxury tend to increase their final price.
+It's worth noting, instead, that amenities like pool, gym, parking and hot tub slightly increase the overall final price. 
+On the opposite ARCs listing AC,  garbage disposal, fireplace, washer dryer, playground, basketball and tennis court in the neighbourhood decrease the overall price.
+The non significant amenities excluded by this model are the TV, alarm, gated, internet access, clable satellite, refrigerator, storage, patio deck and the proximity to clubhouse and golf. 
+
+
+## Least Absolute Shrinkage and Selection operator (LASSO)
+
+As mentioned above, LASSO was here used to perform the feature selection. In particular, the model was fitted using the best tuning parameter (lamdda) chosen with cross validation.
+
+```{r}
+cv.out <- cv.glmnet(x[train,], y[train], alpha = 1)
+bestlam <- cv.out$lambda.min
+
+LASSO <- glmnet(x[train,], y[train], alpha = 1, lambda = bestlam)
+lasso.pred <- predict (LASSO, s = bestlam , newx = x[-train,])
+
+mse_lasso <- mean((lasso.pred - y[-train])^2)
+
+
+```
+
+
+```{r}
+LASSO.compl <- glmnet(x, y, alpha = 1, lambda = bestlam)
+nnzero(LASSO.compl$beta)
+
+coef(LASSO.compl)
+```
+
+Unfortunately this model includes more variables than the one fitted with the forward stepwise. However, it's worth of noting that also in this case the number of bedrooms is excluded from the analysis, confirming the initial assumption about the number of bedrooms considered less important than the size in square meters of the ARC.
+
+In this model only two of the amenities are excluded, but all the amenities in common with the previous model present approximatively the same coefficients. On the opposite, the coefficients of the amenities excluded by the forward selection are here negative but with very small values.
+
+The same can be said for the other coefficients. Therefore, the geographical areas of New England and Mountain give more value to the ARC by 2 percentage points over the previous model.
+
+
+# Conclusions
+
+The price of ARCs, that is apartments for rent classified, has been estimated fitting two models, the first one selected the best features using the stepwise algorithm, the second one inseting in the model a tuning parameter. The final model chosen has been the one selected by stepwise to avoid complexity: the two models, in fact, present the same MSE and their coefficients are very similar.
+
+The analysis confirms that the number of bedrooms does not affect the final price of the ARC, since it is not included in either models. On the opposite the square meters are.
+
+It has been analized the relation between geographic area and rental prices, finding out that the most valuable areas are Pacific (which increases the overall price by 60.9%), New England (+42.6%) and Mid-Atlantic (+35.4%). Conversely, West North Central and East South Central seems to be the less valuable ones.
+
+Particular attention has been given to the amenities offered by the ARCs, pointing out the ones having a greater impact on final price, in particular the presence of the elevator which increases the price by more than 21%, followed by the presence of a doorman (+14.4%), typical of buildings in the business or residential areas. On the opposite, seven of the amenities listed have a negative impact on the price, most of them being sport facilities. One possible explanation coud be the fact that the apartments are located in area outside of the center city. 
+Distance from the center city could be an interesting feature for future analysis of the role of amenities.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

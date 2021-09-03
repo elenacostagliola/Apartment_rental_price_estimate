@@ -1,0 +1,502 @@
+---
+title: "Data_cleaning_apartments"
+author: "Elena Costagliola"
+date: "25/08/2020"
+output: html_document
+---
+```
+Source:
+Collected from Internet 2019-12-28 for a Machine learning task.
+The dataset contains of 10'000 rows and of 22 columns. The data has been cleaned in the way that column price and square_feet never is empty but the dataset is saved as it was created.
+
+Attribute Information:
+id = unique identifier of apartment
+category = category of classified
+title = title text of apartment
+body = body text of apartment
+amenities = like AC, basketball,cable, gym, internet access, pool, refrigerator etc.
+bathrooms = number of bathrooms
+bedrooms = number of bedrooms
+currency = price in current
+fee = fee
+has_photo = photo of apartment
+pets_allowed = what pets are allowed dogs/cats etc.
+price = rental price of apartment
+price_display = price converted into display for reader
+price_type = price in USD
+square_feet = size of the apartment
+address = where the apartment is located
+cityname = where the apartment is located
+state = where the apartment is located
+latitude = where the apartment is located
+longitude = where the apartment is located
+source = origin of classified
+time = when classified was created
+```
+
+```{r setup, include=FALSE}
+library(plyr)
+library(dplyr)
+library(anytime) #operazioni su time
+library(tidyverse)
+library(revgeo) #operazioni su geoloc
+library(stringr) #extract words from a row
+```
+
+# Reading data file
+```{r}
+df <- read.csv2("apartments_for_rent_classified_10K.csv")
+```
+
+# Handle Missing values
+
+Missing values originally saved as "null" have been replaced by *NA*.
+
+```{r}
+df[df == "null"] <- NA # re-run if returns error
+```
+
+Checking missing values:
+```{r}
+sapply(df, function(x) sum(is.na(x)/nrow(df))*100)
+
+```
+Globally there were not lots of missing values, but some imputations were made to handle them.
+
+## Geographic features
+
+Geographic features' missing values were imputed using two methods:
+- using the API of *revgeo* package which takes "longitude" and "latitude" as input and return, when found, the corresponding apartment's location;
+- inspecting the features "body" containing the description of the apartment and looking for its address.
+
+
+### *address*
+
+When inspecting data, it was seen that apartments whose source was "Rentlingo" included the address in their body description. Using gsub it has been possible to extract it and impute to missing values' rows.
+ 
+```{r}
+
+df$address[is.na(df$address) & df$source == "RentLingo"] <- gsub(".*located at |.*located at ,|Monthly.*","", df$body[is.na(df$address) & df$source == "RentLingo"])
+
+```
+
+Still there were a `sum(is.na(df$address)/nrow(df))*100`% of missing values, so the other imputations where made using revgeo.
+
+```{r}
+## slow charging
+#indirizzo <- revgeo(df$longitude[is.na(df$address)], df$latitude[is.na(df$address)], 
+#                  output = "frame")
+
+## load the alread charged "indirizzo" saved as csv
+indirizzo <-read.csv("indirizzo.csv")
+
+df$address[is.na(df$address)] <- paste(indirizzo$housenumber, indirizzo$street, indirizzo$zip)
+
+df$address<- gsub("House Number Not Found Street Not Found ", "", df$address)
+
+```
+
+Note that only the zipcode is available for many of the rows.
+
+A similar imputation is made for the other geographic features.
+
+### *state*
+
+```{r, include = False}
+df$state[is.na(df$state)] <- revgeo(df$longitude[is.na(df$state)], df$latitude[is.na(df$state)], 
+                                      output = "frame")$state
+
+df$state[df$state == "Florida"] <- "FL"
+df$state[df$state == "Kansas"] <- "KS"
+df$state[df$state == "State Not Found"] <- NA
+
+```
+
+The `sum(is.na(df$state)/nrow(df))*100`% of missing data are imputed extracting the information from the address of the apartment.
+```{r}
+df$state[is.na(df$state)] <- str_sub(df$address[is.na(df$state)], start= -2)
+
+```
+
+### *cityname*
+
+```{r, include = FALSE}
+df$cityname[is.na(df$cityname)] <- revgeo(df$longitude[is.na(df$cityname)], df$latitude[is.na(df$cityname)], 
+                                      output = "frame")$city
+
+df$cityname[df$cityname == "City Not Found"] <- NA
+
+```
+
+The `sum(is.na(df$cityname)/nrow(df))*100`% of missing data are imputed extracting the information from the address of the apartment.
+
+```{r}
+df$cityname[is.na(df$cityname)] <- sapply(strsplit(df$address[is.na(df$cityname)], ", "), "[", 2)
+
+```
+
+
+### *Longitude & Latitude*
+
+At this point it longitude and latitude features could be excluded from the dataframe.
+```{r}
+df <- dplyr::select(df, -c("longitude", "latitude"))
+
+```
+
+
+## *Bathrooms & bedrooms*
+The `sum(is.na(df$bathrooms)/nrow(df))*100`% (bathrooms) and `sum(is.na(df$bedrooms)/nrow(df))*100`% (bedrooms) of NAs is due to the lack of data entry by the person who placed the ad. When possible, missing data have been filled by extracting information by the description of the apartment, otherwise rows have been deleted. 
+
+```{r}
+df$bathrooms[is.na(df$bathrooms)] <- ifelse(!is.na(stringr::str_extract(df$body[is.na(df$bathrooms)], 'BA|Bathroom|bathroom|bath|Bath')),1, NA)
+
+df$bedrooms[is.na(df$bedrooms)] <- ifelse(!is.na(stringr::str_extract(df$title[is.na(df$bedrooms)], '.*Bed|bed|bedroom|Bedroom|Bedrooms|bedrooms')),1, NA)
+
+df$bathrooms[is.na(df$bathrooms)] <- ifelse(df$bedrooms[is.na(df$bathrooms)] > 0, 1, NA)
+
+# delete rows
+df <- df[!is.na(df$bathrooms),]
+df <- df[!is.na(df$bedrooms),]
+
+```
+
+
+### *Pets_allowed*
+Given that this column assume values: Cats, Cats&Dogs, Dogs, None, the `sum(is.na(df$pets_allowed)/nrow(df))*100`% of NAs were considered as all animals were allowed.
+```{r}
+#16.51137 %
+df$pets_allowed[is.na(df$pets_allowed)] <- ifelse(!is.na(stringr::str_extract(df$body[is.na(df$pets_allowed)], 'pets allowed|Pets allowed')), "All", NA )
+
+#16.51137 %
+df$pets_allowed[is.na(df$pets_allowed)] <- ifelse(!is.na(stringr::str_extract(df$body[is.na(df$pets_allowed)], 'Cats not allowed|Dogs not allowed')), "None", NA ) #approx
+
+#16.41118 %
+df$pets_allowed[is.na(df$pets_allowed)] <- ifelse(grepl("cat.*dog|dog.*cat", df$body[is.na(df$pets_allowed)], ignore.case = TRUE),"Cats,Dogs", NA)
+
+# 14.73800 %
+df$pets_allowed[is.na(df$pets_allowed)] <- ifelse(grepl("cats", df$body[is.na(df$pets_allowed)], ignore.case = TRUE),"Cats", NA)
+
+#14.65785 %
+df$pets_allowed[is.na(df$pets_allowed)] <- ifelse(grepl("dogs", df$body[is.na(df$pets_allowed)], ignore.case = TRUE),"Dogs", NA)
+
+# 14.59774 %
+df$pets_allowed[is.na(df$pets_allowed)] <- "All"
+
+```
+
+
+### Amenities
+
+This was the feature with the greatest number of missing values and was handled, as above, by inspecting the column "body" to extract the missing amenities. 
+Since it was a single column containing comma separated amenities, the procedure was:
+
+- create a list containing the single amenity, withouth duplicates
+
+```{r}
+df$amenities <- as.character(df$amenities)
+amenities_el <- unique(as.array(unlist(strsplit(df$amenities, split=","))))
+amenities_el <- amenities_el[!is.na(amenities_el)]
+```
+
+- for each element in the list, create a column named with corresponding amenity's name and apply a function which:
+   - search in the merged features body and amenities the corresponding amenity
+   - assign to the new column 1 if the amenity is found, 0 otherwise
+
+```{r}
+ff = function(x, patterns, replacements = patterns, fill = NA, ...)
+{
+    stopifnot(length(patterns) == length(replacements))
+    ans = rep_len(as.character(fill), length(x))    
+    empty = seq_along(x)
+
+    for(i in seq_along(patterns)) {
+        greps = grepl(paste("\\b",patterns[[i]],"\\b", sep = ""), x[empty], ...)
+        ans[empty[greps]] = replacements[[i]]
+        empty = empty[!greps]
+    }
+
+    return(ans)
+}
+
+for (el in amenities_el){
+      df[, el] <- ff(paste(df$body, df$amenities), c(el), c("1"), "0", ignore.case = TRUE)
+}
+
+
+```
+
+The old amenities column were deleted and the new columns renamed.
+
+```{r}
+df <- dplyr::select(df, -("amenities"))
+
+df <- df %>% dplyr::rename( "dishwasher" = "Dishwasher", "elevator" = "Elevator", "patio_deck" = "Patio/Deck", 
+                            "pool" = "Pool", "storage" = "Storage", "refrigerator" = "Refrigerator", 
+                            "basketball" = "Basketball", "cable_satellite" = "Cable or Satellite", "gym" = "Gym",
+                            "internet_access" = "Internet Access", "clubhouse" = "Clubhouse", "parking" = "Parking",
+                            "garbage_disposal" = "Garbage Disposal", "fireplace" = "Fireplace", "washer_dryer" = "Washer Dryer",
+                            "playground" = "Playground", "gated" = "Gated", "hot_tub" = "Hot Tub", "tennis" = "Tennis", 
+                            "wood_floors" = "Wood Floors", "view" = "View", "alarm" = "Alarm", "doorman" = "Doorman",  
+                            "luxury" = "Luxury", "golf" = "Golf" 
+                            )
+```
+
+As seen in the dataframe, lots of rows present 0 in all the amenities columns. It means that the imputations above were not exhaustive and not all missing values were filled. So it was decided to delete the rows containing all the entries in the amenities columns as 0.
+
+```{r}
+df <- df[!apply(df[c("dishwasher", "elevator", "patio_deck", "pool", "storage", "refrigerator", 
+               "AC","basketball", "cable_satellite", "gym", "internet_access", "clubhouse", 
+               "parking","garbage_disposal", "fireplace", "washer_dryer", "playground", "gated", 
+               "hot_tub","tennis", "wood_floors", "view", "alarm", "TV", "doorman", "luxury",
+               "golf")], 1, function(x) all(x == 0)), ] 
+```
+
+
+# Cleaning and adding features
+
+## Category
+
+Inspect this feature by transforming it in factor.
+
+```{r}
+df$category <- as.factor(df$category)
+
+table(df$category)
+```
+
+Most of the apartments for rent was classified as "apartment", so the rows with the other two categories were deleted.
+
+```{r}
+df <- df[!(df$category == "housing/rent/home"| df$category == "housing/rent/short_term"),]
+```
+
+SO, his feature does not provide any information since also if the apartment was described as "apartment" it could be discovered from the title or body features that it was a "studio" instead. So it was replaced by a more meaningful feature created extracting information about apartment type from the descriptive features:
+ 
+- *title*
+
+The new category was created with conditions, assigning at first NA when conditions were not satisfied and then 
+```{r}
+df$newcategory <- ifelse(grepl("studio.*", df$title, ignore.case = TRUE), "studio", NA)
+
+df$newcategory <- ifelse(grepl(".*BR.*|apartment|bed|apartamento", df$title, ignore.case = TRUE) & df$category == "housing/rent/apartment", "apartment", df$newcategory)
+```
+
+- *body*
+
+```{r}
+df$newcategory <- ifelse(grepl(".*BR.*|apartment|bed|apartamento", df$body, ignore.case = TRUE), "apartment", df$newcategory)
+
+df$newcategory <- ifelse(grepl("studio.*", df$body, ignore.case = TRUE),"studio", df$newcategory)
+```
+
+The `sum(is.na(df$newcategory)/nrow(df))*100`% of rows containing was excluded deleting the corresponding rows. 
+```{r}
+df <- df[!is.na(df$newcategory),]
+
+```
+
+This new feature includes the categories studio and apartment for the apartments for rent.
+
+## Statistical divisions
+
+It was added a column indicating the statistical geographic division of the apartments for rent.
+The procedure consists on creating a dataframe which contains the feature state of the original dataframe.
+For each list name "division" contained in the "list divisions" it is created a new column whose entries are TRUE if the state is in the list, FALSE otherwhise.
+```{r}
+divisions <- list(
+        #Northeast
+        northeast_newengland = c("CT", "ME", "MA", "NH", "RI", "VT"),
+        northeast_middle_atlantic = c("NJ", "NY", "PA"),
+        
+        #South
+        south_south_atlantic = c("DE", "FL", "GA", "MD", "NC", "SC", "VA", "WV", "DC"),
+        south_eastsouth_central = c("AL", "KY", "MS", "TN"),
+        south_westsouth_central = c("AR", "LA", "OK", "TX"),
+        
+        #Midwest
+        midwest_eastnorth_central = c("IL", "IN", "MI", "OH", "WI"),
+        midwest_westnorth_central = c("IA", "KS", "MN", "MO", "NE", "ND", "SD"),
+        
+        #West
+        west_mountain = c("AZ","CO", "ID", "MT", "NM", "NV", "UT", "WY"),
+        west_pacific = c("AK", "CA", "OR", "WA", "HI")
+)
+
+
+d <- data.frame("state" = df$state)
+for(division in names(divisions)) {
+        d[division] <-sapply(d$state, function(x) any(trimws(x) %in% divisions[[division]]))
+}
+
+```
+
+Then it was created aother dataframe containing just two columns: the state and the corresponding statistical division with the TRUE entry in the dataframe previously created.
+
+```{r}
+stat_div_tab <- data.frame(state = d[,1], SDiv = names(d[-1])[apply(X = d[names(d[-1])], MARGIN = 1, FUN = function(x) which(x == T)[1])], stringsAsFactors = FALSE)
+
+```
+
+Duplicated are deleted from this new dataframe and a new column is added to the original dataframe, being careful to match the state of df with that of the previous dataframe.
+
+```{r}
+stat_div_tab <- unique(stat_div_tab) #create table without duplicates
+
+df$SDiv <- stat_div_tab$SDiv[match(df$state, stat_div_tab$state)]
+
+```
+
+
+## Statistical regions
+
+To add this feature a faster method was applied using conditions based on divisions.
+```{r}
+df$SReg <- ifelse(df$SDiv == "northeast_newengland"|df$SDiv == "northeast_middle_atlantic", "northeast", NA)
+
+df$SReg <- ifelse(df$SDiv == "south_south_atlantic"|df$SDiv == "south_eastsouth_central"|df$SDiv == "south_westsouth_central", "south", df$SReg)
+
+df$SReg <- ifelse(df$SDiv == "midwest_eastnorth_central"|df$SDiv == "midwest_westnorth_central", "midwest", df$SReg)
+
+df$SReg <- ifelse(df$SDiv == "west_mountain"|df$SDiv == "west_pacific", "west", df$SReg)
+
+```
+
+## Square meters
+
+A more (personally) interpretable measure was choosen to proceed. So feet were converted in meters.
+
+```{r}
+df$square_meters <- df$square_feet / 10.764
+
+```
+
+
+## Price as class of prices
+
+```{r}
+group <- cut(df$price, c(100, 1000, 2000, 3000, 4000, 5000, Inf), right=FALSE, dig.lab=10)
+df$class_price <- as.factor(group)
+
+```
+
+
+# Setting data types
+
+```{r}
+amenities <- c("dishwasher", "elevator", "patio_deck", "pool", "storage", "refrigerator", 
+               "AC","basketball", "cable_satellite", "gym", "internet_access", "clubhouse", 
+               "parking","garbage_disposal", "fireplace", "washer_dryer", "playground", "gated", 
+               "hot_tub","tennis", "wood_floors", "view", "alarm", "TV", "doorman", "luxury",
+               "golf")
+
+numcols <- c("bathrooms", "bedrooms", "price", "square_feet", "square_meters")
+df[, numcols] <- lapply(df[,numcols], as.numeric)
+
+
+factcols <- c("category", "currency", "fee", "has_photo", "pets_allowed", "price_type", "address",
+              "cityname", "state", "source", amenities, "newcategory", "SDiv", "SReg")
+df[, factcols] <- lapply(df[,factcols], as.factor)
+
+df$time <- anytime(df$time, tz = "GMT")
+
+```
+
+# Others operations
+
+Proceed inspecting data.
+
+```{r}
+summary(df)
+```
+
+The summary shows interesting issues to solve.
+
+## *bedrooms*
+
+As seen, there are apartments for rent having zero bedrooms. A bunch of them are actually classified as "studio", the others, apartments classified as "apartment" are more probably a mistake. 
+So it was created a new column which distinguishes apartments with and without bedrooms. Moreover, it was also useful for graphical scope to create a new "bedrooms_f" feature and use it as factor having levels from 0 to 5+, in which the last level includes all the apartments having more than 5 bedrooms.
+
+```{r}
+df$has_bedrooms <- ifelse(df$bedrooms == 0, 0, 1)
+df$bedrooms_f <- ifelse(df$bedrooms >= 5, "5+", df$bedrooms)
+
+df$bedrooms_f <- as.factor(df$bedrooms_f)
+```
+
+Actually, these manipulations were made after data fitting, since the "bedrooms" feature presented unexpected results.
+
+## *pets_allowed*
+
+As can be seen the feature "pets_allowed" is very specific. It was decided to semplify it creating another feature which specifies if pets are actually allowed in the apartment/studio or not.
+
+```{r}
+df$pets <- ifelse(df$pets_allowed == "None", 0, 1)
+
+df$pets <- as.factor(df$pets)
+```
+
+
+## *price_type*
+
+Moreover, it can be seen that "price_type" includes only one apartment which requires to be paid weekly. It was decided to exclude it.
+
+```{r}
+df <- df[!df$price_type == "Weekly",]
+```
+
+
+## *price*
+
+The summary shows a max value of 52500$, but it seemed unlikely for an apartment to be rent at this price. After an internet research it was clear that the value were due to a mistype from the aprtment's owner, so it was excluded from the dataframe
+
+```{r}
+df <- df %>%
+  filter(price < 50000)
+
+```
+
+## *square_meters*
+
+As above an internet research was conducted also for the max of square_meters. Also in this case it seems a mistake, so it was decided to exclude this row as well.
+
+```{r}
+df <- df %>%
+  filter(square_meters < 3000)
+
+```
+
+
+# Exclude variables which provide no information
+
+```{r}
+df <- dplyr::select(df, -c("id", "category", "title", "body", "currency", "fee", 
+                           "has_photo", "pets_allowed", "price_display", "price_type", "square_feet",
+                           "address", "cityname", "state", "source", "time",
+                           "has_bedrooms"
+                           ))
+```
+
+
+# Ordering dataframe's features
+```{r}
+col_order <- c("newcategory", "class_price", "bathrooms", "bedrooms", "bedrooms_f",
+               "pets", "price", "square_meters", "SDiv", "SReg",
+               "dishwasher", "elevator", "patio_deck", "pool", "storage", "refrigerator", 
+               "AC","basketball", "cable_satellite", "gym", "internet_access", "clubhouse", 
+               "parking","garbage_disposal", "fireplace", "washer_dryer", "playground", "gated", 
+               "hot_tub","tennis", "wood_floors", "view", "alarm", "TV", "doorman", "luxury",
+               "golf")
+df <- df[,col_order]
+```
+
+
+```{r}
+save(df, file = "apartments_for_rent_classified_final.RData")
+```
+
+```{}
+write.csv(df, "apartments_for_rent_classified_final.csv")
+```
+
+
